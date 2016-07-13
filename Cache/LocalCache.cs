@@ -97,41 +97,46 @@ namespace CYQ.Data.Cache
         }
         internal LocalCache()
         {
-            //License.CheckOnApplicationStart();//检测授权。
-            theCache = H.Cache;
-            //workTime = DateTime.Now.AddMinutes(5);
-            ThreadBreak.AddGlobalThread(new ParameterizedThreadStart(ClearState));
-        }
-        int taskCount = 0, taskInterval = 10;//10分钟清一次缓存。
-        private void ClearState(object threadID)
-        {
             try
             {
-                startTime = DateTime.Now;
-                int gcTime = AppConfig.Cache.GCCollectTime / taskInterval;
-                gcTime = gcTime == 0 ? 1 : gcTime;
-
-                while (true)
+                theCache = H.Cache;//如果配置文件错误会引发此异常。
+                ThreadBreak.AddGlobalThread(new ParameterizedThreadStart(ClearState));
+                if (AppConfig.Cache.IsAutoCache)
+                {
+                    ThreadBreak.AddGlobalThread(new ParameterizedThreadStart(AutoCache.ClearCache));
+                }
+            }
+            catch (Exception err)
+            {
+                Log.WriteLogToTxt(err);
+                // throw;
+            }
+        }
+        int taskCount = 0, taskInterval = 10;//10分钟清一次缓存。
+        private static DateTime errTime = DateTime.MinValue;
+        private void ClearState(object threadID)
+        {
+            startTime = DateTime.Now;
+            while (true)
+            {
+                try
                 {
                     workTime = startTime.AddMinutes((taskCount + 1) * taskInterval);
                     TimeSpan ts = workTime - DateTime.Now;
-                    
-                    try
+                    if (ts.TotalSeconds > 0)
                     {
-                        if (ts.TotalSeconds > 0)
-                        {
-                            Thread.Sleep(ts);//taskInterval * 60 * 1000);//10分钟休眠时间
-                        }
-                        #region 新的机制
-                        if (keyTime.ContainsKey(taskCount))
-                        {
-                            RemoveList(keyTime[taskCount].ToString().Split(','));
-                            keyTime.Remove(taskCount);
-                        }
-                        #endregion
+                        Thread.Sleep(ts);//taskInterval * 60 * 1000);//10分钟休眠时间
+                    }
+                    #region 新的机制
+                    if (keyTime.ContainsKey(taskCount))
+                    {
+                        RemoveList(keyTime[taskCount].ToString().Split(','));
+                        keyTime.Remove(taskCount);
+                    }
+                    #endregion
 
-                        #region 旧方式、注释掉
-                        /*
+                    #region 旧方式、注释掉
+                    /*
                         if (theCache.Count != theState.Count)//准备同步
                         {
                             workTime = DateTime.Now.AddMinutes(cacheClearWorkTime);
@@ -155,28 +160,39 @@ namespace CYQ.Data.Cache
                             clearCount = removeKeys.Count;
                             removeKeys.Clear();
                         } */
-                        #endregion
+                    #endregion
 
-                    }
-                    catch (Exception err)
+                }
+                catch (OutOfMemoryException)
+                { }
+                catch (Exception err)
+                {
+                    if (errTime == DateTime.MinValue || errTime.AddMinutes(10) < DateTime.Now) // 10分钟记录一次
                     {
-                        Log.WriteLogToTxt(err);
-                    }
-                    finally
-                    {
-                        taskCount++;
-                    }
-                    if (taskCount % gcTime == 0)
-                    {
-                        GC.Collect();
+                        errTime = DateTime.Now;
+                        Log.WriteLogToTxt("LocalCache.ClearState:" + Log.GetExceptionMessage(err));
                     }
                 }
-            }
-            catch (Exception err)
-            {
-                Log.WriteLogToTxt(err);
-            }
+                finally
+                {
+                    taskCount++;
+                    if (taskCount % 10 == 9)
+                    {
+                        try
+                        {
+                            if (RemainMemoryPercentage < 25)
+                            {
+                                GC.Collect();
+                            }
+                        }
+                        catch
+                        {
 
+                        }
+                    }
+                }
+
+            }
         }
         private int errorCount = 0;//缓存捕异常次数
         /// <summary>
@@ -293,12 +309,12 @@ namespace CYQ.Data.Cache
         /// <param name="value">对象值</param>
         public override void Add(string key, object value)
         {
-            Add(key, value, null, 0);
+            Add(key, value, null, AppConfig.Cache.DefaultCacheTime);
         }
         /// <param name="fileName">关联的文件</param>
         public override void Add(string key, object value, string fileName)
         {
-            Add(key, value, fileName, 0);//再插入Cache
+            Add(key, value, fileName, AppConfig.Cache.DefaultCacheTime);//再插入Cache
         }
         /// <param name="cacheMinutes">缓存时间(单位分钟)</param>
         public override void Add(string key, object value, double cacheMinutes)
@@ -325,7 +341,7 @@ namespace CYQ.Data.Cache
         /// </summary>
         public override void Set(string key, object value)
         {
-            Set(key, value, 0);
+            Set(key, value, AppConfig.Cache.DefaultCacheTime);
         }
         public override void Set(string key, object value, double cacheMinutes)
         {

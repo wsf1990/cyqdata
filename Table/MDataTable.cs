@@ -37,7 +37,7 @@ namespace CYQ.Data.Table
                     string name = string.Empty;
 
                     string hiddenFields = "," + AppConfig.DB.HiddenFields.ToLower() + ",";
-                    bool isHiddenField = false, isContain = false;
+                    bool isHiddenField = false;
                     for (int i = 0; i < sdr.FieldCount; i++)
                     {
                         name = sdr.GetName(i);
@@ -45,11 +45,13 @@ namespace CYQ.Data.Table
                         {
                             name = "Empty_" + i;
                         }
+                        name = name.Trim('"');//sqlite的双引号问题。
                         isHiddenField = hiddenFields.IndexOf("," + name + ",", StringComparison.OrdinalIgnoreCase) > -1;
-                        isContain = Columns.Contains(name);
+                        MCellStruct ms = Columns[name];
+                        //isContain = Columns.Contains(name);
                         if (isHiddenField)
                         {
-                            if (isContain)
+                            if (ms != null)
                             {
                                 Columns.Remove(name);
                             }
@@ -60,16 +62,17 @@ namespace CYQ.Data.Table
                         }
                         else
                         {
-                            if (isContain)
+                            if (ms != null)
                             {
+                                ms.ReaderIndex = i;//设置和SDR对应的索引
                                 Columns.SetOrdinal(name, i);
                             }
                             else
                             {
-                                MCellStruct ms = new MCellStruct(name, DataType.GetSqlType(sdr.GetFieldType(i)));
-                                ms.ReaderIndex = i;
-                                MDataCell mdc = new MDataCell(ref ms);
-                                Columns.Add(ms);
+                                MCellStruct ms2 = new MCellStruct(name, DataType.GetSqlType(sdr.GetFieldType(i)));
+                                ms2.ReaderIndex = i;
+                                MDataCell mdc = new MDataCell(ref ms2);
+                                Columns.Add(ms2);
                             }
                         }
                         columns.Add(name.ToLower());
@@ -89,13 +92,35 @@ namespace CYQ.Data.Table
                     {
                         MDataRow mRecord = null;
                         object value = null;
+                        List<int> errIndex = new List<int>();
                         while (sdr.Read())
                         {
                             mRecord = this.NewRow();
                             for (int i = 0; i < Columns.Count; i++)
                             {
+                                #region 读取数据
                                 MCellStruct ms = Columns[i];
-                                value = ms.ReaderIndex > -1 ? sdr[ms.ReaderIndex] : sdr[ms.ColumnName];
+                                try
+                                {
+                                    if (!errIndex.Contains(i))
+                                    {
+                                        value = ms.ReaderIndex > -1 ? sdr[ms.ReaderIndex] : sdr[ms.ColumnName];
+                                    }
+                                    else
+                                    {
+                                        value = sdr.GetString(ms.ReaderIndex > -1 ? ms.ReaderIndex : i);
+                                    }
+                                }
+                                catch
+                                {
+                                    if (!errIndex.Contains(i))
+                                    {
+                                        errIndex.Add(i);
+                                    }
+                                    value = sdr.GetString(ms.ReaderIndex > -1 ? ms.ReaderIndex : i);
+                                }
+
+
                                 if (value == null || value == DBNull.Value)
                                 {
                                     mRecord[i].cellValue.Value = DBNull.Value;
@@ -109,12 +134,11 @@ namespace CYQ.Data.Table
                                 {
                                     mRecord[i].Value = value;
                                 }
-
+                                #endregion
                             }
                             Rows.Add(mRecord);
                         }
-
-
+                        errIndex = null;
                     }
                     #endregion
                 }
@@ -138,7 +162,6 @@ namespace CYQ.Data.Table
             }
             return dt;
         }
-
 
         /// <summary>
         /// 从DataTable隐式转换成MDataTable
@@ -184,6 +207,17 @@ namespace CYQ.Data.Table
             mdt.Columns = rows[0].Columns;
             mdt.Rows.AddRange(rows);
             return mdt;
+        }
+        /// <summary>
+        /// 将一行数据装载成一个表。
+        /// </summary>
+        /// <returns></returns>
+        public static implicit operator MDataTable(MDataRow row)
+        {
+            MDataTable mTable = new MDataTable(row.TableName);
+            mTable.Conn = row.Conn;
+            mTable.LoadRow(row);
+            return mTable;
         }
         #endregion
 
@@ -669,6 +703,10 @@ namespace CYQ.Data.Table
             MDataTable dt = new MDataTable(_TableName);
             dt.Columns = Columns;
             dt.Conn = Conn;
+            dt.DynamicData = DynamicData;
+            dt.joinOnIndex = joinOnIndex;
+            dt.JoinOnName = dt.JoinOnName;
+            dt.RecordsAffected = RecordsAffected;
             if (this.Rows.Count > 0)
             {
                 if (rowOp == RowOp.Insert || rowOp == RowOp.Update)
@@ -1149,6 +1187,8 @@ namespace CYQ.Data.Table
     }
     public partial class MDataTable
     {
+        #region 静态方法 CreateFrom
+
         /// <summary>
         /// 不关闭Sdr（因为外部MProc.ExeMDataTableList还需要使用）
         /// </summary>
@@ -1183,11 +1223,27 @@ namespace CYQ.Data.Table
                 if (dt != null && dt.Rows.Count > 0)
                 {
                     mTable.Columns = TableSchema.GetColumns(dt);
+                    MCellStruct ms;
+                    string name;
+                    for (int i = 0; i < sdr.FieldCount; i++)//设置相同的读索引。
+                    {
+                        name = sdr.GetName(i).Trim('"');//mssql是有空列存在的。
+                        if (string.IsNullOrEmpty(name))
+                        {
+                            name = "Empty_" + i;
+                        }
+                        ms = mTable.Columns[name];//sqlite的双引号问题
+                        if (ms != null)
+                        {
+                            ms.ReaderIndex = i;
+                        }
+                    }
                 }
                 #endregion
                 if (sdr.HasRows)
                 {
                     MDataRow mRecord = null;
+                    List<int> errIndex = new List<int>();//SQLite提供的dll不靠谱，sdr[x]类型转不过时，会直接抛异常
                     while (sdr.Read())
                     {
                         #region 读数据行
@@ -1196,7 +1252,26 @@ namespace CYQ.Data.Table
                         for (int i = 0; i < mTable.Columns.Count; i++)
                         {
                             MCellStruct ms = mTable.Columns[i];
-                            object value = ms.ReaderIndex > -1 ? sdr[ms.ReaderIndex] : sdr[ms.ColumnName];
+                            object value = null;
+                            try
+                            {
+                                if (errIndex.Contains(i))
+                                {
+                                    value = sdr.GetString(ms.ReaderIndex > -1 ? ms.ReaderIndex : i);
+                                }
+                                else
+                                {
+                                    value = ms.ReaderIndex > -1 ? sdr[ms.ReaderIndex] : sdr[ms.ColumnName];
+                                }
+                            }
+                            catch
+                            {
+                                if (!errIndex.Contains(i))
+                                {
+                                    errIndex.Add(i);
+                                }
+                                value = sdr.GetString(ms.ReaderIndex > -1 ? ms.ReaderIndex : i);
+                            }
 
                             if (value == null || value == DBNull.Value)
                             {
@@ -1428,6 +1503,7 @@ namespace CYQ.Data.Table
             }
             return dt;
         }
+        #endregion
 
         #region 列的取值：Min、Max、Sum、Avg
         private T GetMinMaxValue<T>(string columnName, string ascOrDesc)
@@ -1636,6 +1712,28 @@ namespace CYQ.Data.Table
             return dt;
         }
         #endregion
+
+
+        internal void Load(MDataTable dt)
+        {
+            if (dt == null || dt.Rows.Count == 0)
+            {
+                return;
+            }
+            string pkName = Columns.FirstPrimary.ColumnName;
+            int i1 = Columns.GetIndex(pkName);
+            MDataRow rowA, rowB;
+
+            for (int i = 0; i < Rows.Count; i++)
+            {
+                rowA = Rows[i];
+                rowB = dt.FindRow(pkName + "='" + rowA[i1].strValue + "'");
+                if (rowB != null)
+                {
+                    rowA.LoadFrom(rowB);
+                }
+            }
+        }
 
         #region 注释掉代码
         /*
